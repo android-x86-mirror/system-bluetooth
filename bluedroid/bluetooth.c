@@ -63,7 +63,7 @@ static int init_rfkill() {
     while((entry = readdir(sysdir)) != NULL) {
         if (!(strcmp(".", entry->d_name) && strcmp("..", entry->d_name)))
             continue;
-        snprintf(path, sizeof(path), "%s/%s/name", sysrfkill, entry->d_name);
+        snprintf(path, sizeof(path), "%s/%s/type", sysrfkill, entry->d_name);
         fd = open(path, O_RDONLY);
         if (fd < 0) {
             LOGW("open(%s) failed: %s (%d)\n", path, strerror(errno), errno);
@@ -71,7 +71,7 @@ static int init_rfkill() {
         }
         sz = read(fd, &buf, sizeof(buf));
         close(fd);
-        if (sz >= 3 && memcmp(buf, "hci", 3) == 0) {
+        if (sz >= 9 && memcmp(buf, "bluetooth", 9) == 0) {
             char *sp;
             if (asprintf(&sp, "/sys/class/rfkill/%s/state", entry->d_name) > 0) {
                 LOGI("found bluetooth at %s\n", path);
@@ -86,7 +86,6 @@ static int init_rfkill() {
 }
 
 static int check_bluetooth_power() {
-    int sz;
     int fd = -1;
     int ret = -1;
     char buffer;
@@ -101,8 +100,7 @@ static int check_bluetooth_power() {
              errno);
         goto out;
     }
-    sz = read(fd, &buffer, 1);
-    if (sz != 1) {
+    if (read(fd, &buffer, 1) != 1) {
         LOGE("read(%s) failed: %s (%d)", rfkill_state_path, strerror(errno),
              errno);
         goto out;
@@ -123,14 +121,14 @@ out:
 }
 
 static int set_bluetooth_power(int on) {
-    int sz;
     int fd = -1;
-    int ret = -1;
+    int ret = check_bluetooth_power();
     const char buffer = (on ? '1' : '0');
 
-    if (rfkill_state_path == NULL) {
-        if (init_rfkill()) goto out;
-    }
+    if (ret < 0)
+        return ret;
+    else if (ret == on)
+        return 0;
 
     fd = open(rfkill_state_path, O_WRONLY);
     if (fd < 0) {
@@ -138,8 +136,7 @@ static int set_bluetooth_power(int on) {
              strerror(errno), errno);
         goto out;
     }
-    sz = write(fd, &buffer, 1);
-    if (sz < 0) {
+    if (write(fd, &buffer, 1) != 1) {
         LOGE("write(%s) failed: %s (%d)", rfkill_state_path, strerror(errno),
              errno);
         goto out;
@@ -151,7 +148,7 @@ out:
     return ret;
 }
 
-static inline int create_hci_sock() {
+static int create_hci_sock() {
     int sk = socket(AF_BLUETOOTH, SOCK_RAW, BTPROTO_HCI);
     if (sk < 0) {
         LOGE("Failed to create bluetooth hci socket: %s (%d)",
@@ -167,8 +164,6 @@ int bt_enable() {
     int hci_sock = -1;
     int attempt;
 
-    if (set_bluetooth_power(1) < 0) goto out;
-
     LOGI("Starting hciattach daemon");
     if (property_set("ctl.start", "hciattach") < 0) {
         LOGE("Failed to start hciattach");
@@ -177,13 +172,20 @@ int bt_enable() {
 
     // Try for 10 seconds, this can only succeed once hciattach has sent the
     // firmware and then turned on hci device via HCIUARTSETPROTO ioctl
-    for (attempt = 1000; attempt > 0;  attempt--) {
+    for (attempt = 10; attempt > 0; --attempt) {
+        int res = set_bluetooth_power(1);
+        sleep(1);
+        if (res < 0) {
+            bt_disable();
+            continue;
+        }
         hci_sock = create_hci_sock();
         if (hci_sock < 0) goto out;
 
-        if (!ioctl(hci_sock, HCIDEVUP, HCI_DEV_ID)) {
+        if (!ioctl(hci_sock, HCIDEVUP, HCI_DEV_ID))
             break;
-        }
+
+        LOGE("ioctl failed: %s (%d)", strerror(errno), errno);
         close(hci_sock);
         usleep(10000);  // 10 ms retry delay
     }
