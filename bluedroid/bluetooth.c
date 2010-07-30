@@ -82,7 +82,6 @@ static int init_rfkill() {
 }
 
 static int check_bluetooth_power() {
-    int sz;
     int fd = -1;
     int ret = -1;
     char buffer;
@@ -97,8 +96,7 @@ static int check_bluetooth_power() {
              errno);
         goto out;
     }
-    sz = read(fd, &buffer, 1);
-    if (sz != 1) {
+    if (read(fd, &buffer, 1) != 1) {
         LOGE("read(%s) failed: %s (%d)", rfkill_state_path, strerror(errno),
              errno);
         goto out;
@@ -119,14 +117,14 @@ out:
 }
 
 static int set_bluetooth_power(int on) {
-    int sz;
     int fd = -1;
-    int ret = -1;
+    int ret = check_bluetooth_power();
     const char buffer = (on ? '1' : '0');
 
-    if (rfkill_state_path[0] == '\0') {
-        if (init_rfkill()) goto out;
-    }
+    if (ret < 0)
+        return ret;
+    else if (ret == on)
+        return 0;
 
     fd = open(rfkill_state_path, O_WRONLY);
     if (fd < 0) {
@@ -134,8 +132,7 @@ static int set_bluetooth_power(int on) {
              strerror(errno), errno);
         goto out;
     }
-    sz = write(fd, &buffer, 1);
-    if (sz < 0) {
+    if (write(fd, &buffer, 1) != 1) {
         LOGE("write(%s) failed: %s (%d)", rfkill_state_path, strerror(errno),
              errno);
         goto out;
@@ -147,7 +144,7 @@ out:
     return ret;
 }
 
-static inline int create_hci_sock() {
+static int create_hci_sock() {
     int sk = socket(AF_BLUETOOTH, SOCK_RAW, BTPROTO_HCI);
     if (sk < 0) {
         LOGE("Failed to create bluetooth hci socket: %s (%d)",
@@ -163,8 +160,6 @@ int bt_enable() {
     int hci_sock = -1;
     int attempt;
 
-    if (set_bluetooth_power(1) < 0) goto out;
-
     LOGI("Starting hciattach daemon");
     if (property_set("ctl.start", "hciattach") < 0) {
         LOGE("Failed to start hciattach");
@@ -174,13 +169,19 @@ int bt_enable() {
 
     // Try for 10 seconds, this can only succeed once hciattach has sent the
     // firmware and then turned on hci device via HCIUARTSETPROTO ioctl
-    for (attempt = 1000; attempt > 0;  attempt--) {
+    for (attempt = 10; attempt > 0; --attempt) {
+        int res = set_bluetooth_power(1);
+        usleep(900000);
+        if (res < 0) {
+            bt_disable();
+            continue;
+        }
         hci_sock = create_hci_sock();
         if (hci_sock < 0) goto out;
 
         ret = ioctl(hci_sock, HCIDEVUP, HCI_DEV_ID);
 
-        LOGI("bt_enable: ret: %d, errno: %d", ret, errno);
+        LOGI("bt_enable: ret: %d, errno: %s (%d)", ret, strerror(errno), errno);
         if (!ret) {
             break;
         } else if (errno == EALREADY) {
